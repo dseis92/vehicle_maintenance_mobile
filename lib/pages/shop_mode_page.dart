@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../constants/app_constants.dart';
+import '../services/service_event_service.dart';
+import '../services/vehicle_service.dart';
+import '../utils/date_helpers.dart';
+import '../utils/number_helpers.dart';
 import 'vehicle_details_page.dart';
-
-final supabase = Supabase.instance.client;
 
 /// Shop Mode:
 /// - Tech-friendly list of vehicles
@@ -17,6 +20,9 @@ class ShopModePage extends StatefulWidget {
 }
 
 class _ShopModePageState extends State<ShopModePage> {
+  final _vehicleService = VehicleService();
+  final _serviceEventService = ServiceEventService();
+
   bool _loading = true;
   String? _errorText;
 
@@ -38,118 +44,76 @@ class _ShopModePageState extends State<ShopModePage> {
     });
 
     try {
-      final user = supabase.auth.currentUser;
-      if (user == null) {
-        setState(() {
-          _errorText = 'No user logged in.';
-          _vehicles = [];
-          _lastChargeByVehicleId = {};
-        });
-        return;
-      }
-
       // Load all vehicles for this user
-      final vehiclesResp = await supabase
-          .from('vehicles')
-          .select()
-          .eq('user_id', user.id)
-          .order('created_at', ascending: true);
-
-      final vehiclesList =
-          (vehiclesResp as List<dynamic>? ?? []).cast<Map<String, dynamic>>();
+      final vehiclesList = await _vehicleService.getVehicles();
 
       // Collect golf cart IDs for charge-rotation lookup
       final golfCartIds = <String>{};
       for (final v in vehiclesList) {
         final type = v['vehicle_type'] as String?;
         final id = v['id'] as String?;
-        if (type == 'golf_cart' && id != null) {
+        if (type == VehicleTypes.golfCart && id != null) {
           golfCartIds.add(id);
         }
       }
 
-      Map<String, DateTime?> lastCharge = {};
+      final lastCharge = <String, DateTime?>{};
 
       if (golfCartIds.isNotEmpty) {
-        // Load all Charge rotation events for this user, newest first
-        final eventsResp = await supabase
-            .from('service_events')
-            .select('vehicle_id, service_date, category')
-            .eq('user_id', user.id)
-            .eq('category', 'Charge rotation')
-            .order('service_date', ascending: false);
+        // Load charge rotation events for golf carts
+        for (final cartId in golfCartIds) {
+          final events = await _serviceEventService.getServiceEventsByCategory(
+            cartId,
+            MaintenanceCategories.chargeRotation,
+          );
 
-        final eventsList =
-            (eventsResp as List<dynamic>? ?? []).cast<Map<String, dynamic>>();
-
-        // First occurrence per vehicle (since sorted desc = newest),
-        // but only for golf cart IDs we care about.
-        for (final e in eventsList) {
-          final vehicleId = e['vehicle_id'] as String?;
-          final dateStr = e['service_date'] as String?;
-          if (vehicleId == null || dateStr == null) continue;
-          if (!golfCartIds.contains(vehicleId)) continue;
-          if (lastCharge.containsKey(vehicleId)) continue;
-          try {
-            lastCharge[vehicleId] = DateTime.parse(dateStr);
-          } catch (_) {
-            // skip invalid dates
+          if (events.isNotEmpty) {
+            final dateStr = events.first['service_date'] as String?;
+            if (dateStr != null) {
+              try {
+                lastCharge[cartId] = DateTime.parse(dateStr);
+              } catch (_) {
+                // skip invalid dates
+              }
+            }
           }
         }
       }
 
-      setState(() {
-        _vehicles = vehiclesList;
-        _lastChargeByVehicleId = lastCharge;
-      });
+      if (mounted) {
+        setState(() {
+          _vehicles = vehiclesList;
+          _lastChargeByVehicleId = lastCharge;
+        });
+      }
     } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-        _vehicles = [];
-        _lastChargeByVehicleId = {};
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = e.message;
+          _vehicles = [];
+          _lastChargeByVehicleId = {};
+        });
+      }
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-        _vehicles = [];
-        _lastChargeByVehicleId = {};
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Unexpected error: $e';
+          _vehicles = [];
+          _lastChargeByVehicleId = {};
+        });
+      }
     } finally {
-      setState(() {
-        _loading = false;
-      });
-    }
-  }
-
-  String _formatDate(DateTime? d) {
-    if (d == null) return 'Not set';
-    return '${d.month}/${d.day}/${d.year}';
-  }
-
-  String _vehicleTypeLabel(String? type) {
-    switch (type) {
-      case 'car':
-        return 'Car';
-      case 'truck':
-        return 'Truck';
-      case 'van':
-        return 'Van';
-      case 'motorcycle':
-        return 'Motorcycle';
-      case 'golf_cart':
-        return 'Golf Cart';
-      case 'equipment':
-        return 'Equipment';
-      case 'other':
-        return 'Other';
-      default:
-        return '';
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
     }
   }
 
   Future<void> _showQuickOdometerDialog(Map<String, dynamic> vehicle) async {
     final currentOdo = vehicle['current_odometer'] as num?;
-    final unit = vehicle['odometer_unit'] as String? ?? 'mi';
+    final unit = vehicle['odometer_unit'] as String? ?? OdometerUnits.miles;
 
     final controller = TextEditingController(
       text: currentOdo != null ? currentOdo.toInt().toString() : '',
@@ -180,8 +144,7 @@ class _ShopModePageState extends State<ShopModePage> {
                   Navigator.of(context).pop(null);
                   return;
                 }
-                final parsed =
-                    num.tryParse(text.replaceAll(',', ''));
+                final parsed = NumberHelpers.parseNumber(text);
                 Navigator.of(context).pop(parsed);
               },
               child: const Text('Save'),
@@ -194,33 +157,27 @@ class _ShopModePageState extends State<ShopModePage> {
     if (value == null) return;
 
     try {
-      await supabase
-          .from('vehicles')
-          .update({'current_odometer': value}).eq('id', vehicle['id']);
+      await _vehicleService.updateOdometer(vehicle['id'], value);
 
       // refresh list
       await _loadData();
     } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = e.message;
+        });
+      }
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Unexpected error: $e';
+        });
+      }
     }
   }
 
   Future<void> _quickCharge(Map<String, dynamic> vehicle,
       {DateTime? date}) async {
-    final user = supabase.auth.currentUser;
-    if (user == null) {
-      setState(() {
-        _errorText = 'No user logged in.';
-      });
-      return;
-    }
-
     final vehicleId = vehicle['id'] as String?;
     if (vehicleId == null) {
       setState(() {
@@ -232,34 +189,35 @@ class _ShopModePageState extends State<ShopModePage> {
     final DateTime serviceDate = date ?? DateTime.now();
 
     try {
-      await supabase.from('service_events').insert({
-        'user_id': user.id,
-        'vehicle_id': vehicleId,
-        'service_date': serviceDate.toIso8601String(),
-        'category': 'Charge rotation',
-        'odometer': null,
-        'cost': null,
-        'performed_by': 'Shop',
-        'notes': null,
-      });
+      await _serviceEventService.createServiceEvent(
+        vehicleId: vehicleId,
+        serviceDate: serviceDate.toIso8601String(),
+        category: MaintenanceCategories.chargeRotation,
+        performedBy: 'Shop',
+      );
 
-      setState(() {
-        _lastChargeByVehicleId[vehicleId] = serviceDate;
-      });
+      if (mounted) {
+        setState(() {
+          _lastChargeByVehicleId[vehicleId] = serviceDate;
+        });
+      }
     } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = e.message;
+        });
+      }
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Unexpected error: $e';
+        });
+      }
     }
   }
 
   Future<void> _pickChargeDate(Map<String, dynamic> vehicle) async {
-    final initial = _lastChargeByVehicleId[vehicle['id']] ??
-        DateTime.now();
+    final initial = _lastChargeByVehicleId[vehicle['id']] ?? DateTime.now();
 
     final picked = await showDatePicker(
       context: context,
@@ -276,13 +234,13 @@ class _ShopModePageState extends State<ShopModePage> {
   Widget _buildVehicleCard(Map<String, dynamic> v) {
     final name = v['name'] as String? ?? 'Vehicle';
     final type = v['vehicle_type'] as String? ?? '';
-    final typeLabel = _vehicleTypeLabel(type);
+    final typeLabel = VehicleTypes.getLabel(type);
     final year = v['year']?.toString();
     final make = v['make'] as String?;
     final model = v['model'] as String?;
     final trim = v['trim'] as String?;
     final currentOdo = v['current_odometer'] as num?;
-    final unit = v['odometer_unit'] as String? ?? 'mi';
+    final unit = v['odometer_unit'] as String? ?? OdometerUnits.miles;
 
     final subtitleParts = <String>[];
     if (year != null && year.isNotEmpty) subtitleParts.add(year);
@@ -291,16 +249,15 @@ class _ShopModePageState extends State<ShopModePage> {
     if (trim != null && trim.isNotEmpty) subtitleParts.add(trim);
     final subtitle = subtitleParts.join(' ');
 
-    String odoText =
-        currentOdo != null ? '${currentOdo.toInt()} $unit' : 'Not set';
+    final odoText = NumberHelpers.formatOdometer(currentOdo, unit);
 
-    final isGolfCart = type == 'golf_cart';
+    final isGolfCart = type == VehicleTypes.golfCart;
     final vehicleId = v['id'] as String?;
     final lastCharge =
         vehicleId != null ? _lastChargeByVehicleId[vehicleId] : null;
 
     return InkWell(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
       onTap: () {
         // Still allow full details when tapped
         Navigator.of(context).push(
@@ -310,29 +267,30 @@ class _ShopModePageState extends State<ShopModePage> {
         );
       },
       child: Card(
-        elevation: 1,
+        elevation: UiConstants.cardElevation - 1,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
         ),
-        margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+        margin: const EdgeInsets.symmetric(
+          vertical: 6,
+          horizontal: 4,
+        ),
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(UiConstants.spacingSmall + 4),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               CircleAvatar(
                 radius: 22,
                 backgroundColor:
-                    Theme.of(context).colorScheme.primary.withOpacity(0.1),
+                    Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
                 child: Icon(
-                  isGolfCart
-                      ? Icons.electric_scooter
-                      : Icons.directions_car,
+                  VehicleTypes.getIcon(type),
                   color: Theme.of(context).colorScheme.primary,
                   size: 22,
                 ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: UiConstants.spacingSmall + 4),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -373,8 +331,7 @@ class _ShopModePageState extends State<ShopModePage> {
                       Align(
                         alignment: Alignment.centerLeft,
                         child: OutlinedButton.icon(
-                          onPressed: () =>
-                              _showQuickOdometerDialog(v),
+                          onPressed: () => _showQuickOdometerDialog(v),
                           icon: const Icon(
                             Icons.speed,
                             size: 16,
@@ -388,7 +345,7 @@ class _ShopModePageState extends State<ShopModePage> {
                     ] else ...[
                       // Golf carts: quick charge date
                       Text(
-                        'Last charge: ${_formatDate(lastCharge)}',
+                        'Last charge: ${DateHelpers.formatDateTime(lastCharge)}',
                         style: const TextStyle(
                           fontSize: 12,
                           color: Colors.grey,
@@ -446,7 +403,7 @@ class _ShopModePageState extends State<ShopModePage> {
               ? const Center(child: CircularProgressIndicator())
               : _vehicles.isEmpty
                   ? ListView(
-                      padding: const EdgeInsets.all(16),
+                      padding: const EdgeInsets.all(UiConstants.spacingMedium),
                       children: const [
                         Text(
                           'No vehicles yet. Add vehicles from the main garage first.',
@@ -458,7 +415,7 @@ class _ShopModePageState extends State<ShopModePage> {
                       ],
                     )
                   : ListView(
-                      padding: const EdgeInsets.all(8),
+                      padding: const EdgeInsets.all(UiConstants.spacingSmall),
                       children: [
                         if (_errorText != null) ...[
                           Padding(

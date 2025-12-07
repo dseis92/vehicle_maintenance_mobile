@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-final supabase = Supabase.instance.client;
+import '../constants/app_constants.dart';
+import '../services/auth_service.dart';
+import '../utils/validation_helpers.dart';
 
 class SignInPage extends StatefulWidget {
   const SignInPage({super.key});
@@ -11,13 +13,20 @@ class SignInPage extends StatefulWidget {
 }
 
 class _SignInPageState extends State<SignInPage> {
+  final _formKey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _authService = AuthService();
 
   bool _loading = false;
   String? _errorText;
 
   Future<void> _signIn() async {
+    // Validate form
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+
     setState(() {
       _loading = true;
       _errorText = null;
@@ -27,17 +36,12 @@ class _SignInPageState extends State<SignInPage> {
       final email = _emailController.text.trim();
       final password = _passwordController.text;
 
-      if (email.isEmpty || password.isEmpty) {
-        setState(() {
-          _errorText = 'Email and password are required';
-        });
-        return;
-      }
+      final response = await _authService.signIn(
+        email: email,
+        password: password,
+      );
 
-      final resp =
-          await supabase.auth.signInWithPassword(email: email, password: password);
-
-      if (resp.session == null) {
+      if (response.session == null) {
         setState(() {
           _errorText = 'No session returned. Check your credentials.';
         });
@@ -51,13 +55,20 @@ class _SignInPageState extends State<SignInPage> {
         _errorText = 'Unexpected error: $e';
       });
     } finally {
-      setState(() {
-        _loading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
     }
   }
 
   Future<void> _signUp() async {
+    // Validate form
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+
     setState(() {
       _loading = true;
       _errorText = null;
@@ -67,34 +78,35 @@ class _SignInPageState extends State<SignInPage> {
       final email = _emailController.text.trim();
       final password = _passwordController.text;
 
-      if (email.isEmpty || password.isEmpty) {
-        setState(() {
-          _errorText = 'Email and password are required';
-        });
-        return;
-      }
-
-      await supabase.auth.signUp(
+      await _authService.signUp(
         email: email,
         password: password,
       );
 
-      setState(() {
-        _errorText =
-            'Sign-up successful. Check email if confirmation is required, then sign in.';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText =
+              'Sign-up successful. Check email if confirmation is required, then sign in.';
+        });
+      }
     } on AuthException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = e.message;
+        });
+      }
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Unexpected error: $e';
+        });
+      }
     } finally {
-      setState(() {
-        _loading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
     }
   }
 
@@ -114,75 +126,86 @@ class _SignInPageState extends State<SignInPage> {
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            padding: const EdgeInsets.symmetric(
+              horizontal: UiConstants.spacingLarge,
+              vertical: UiConstants.spacingMedium,
+            ),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 420),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Icon(
-                    Icons.directions_car,
-                    size: 64,
-                    color: theme.colorScheme.primary,
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Vehicle Maintenance',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.bold,
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Icon(
+                      Icons.directions_car,
+                      size: 64,
+                      color: theme.colorScheme.primary,
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Sign in to see your garage, service history, and reminders.',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: Colors.grey[600],
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  TextField(
-                    controller: _emailController,
-                    keyboardType: TextInputType.emailAddress,
-                    decoration: const InputDecoration(
-                      labelText: 'Email',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _passwordController,
-                    obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: 'Password',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  if (_errorText != null) ...[
+                    const SizedBox(height: UiConstants.spacingMedium),
                     Text(
-                      _errorText!,
-                      style: const TextStyle(color: Colors.red, fontSize: 12),
+                      'Vehicle Maintenance',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Sign in to see your garage, service history, and reminders.',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: Colors.grey[600],
+                      ),
+                    ),
+                    const SizedBox(height: UiConstants.spacingLarge),
+                    TextFormField(
+                      controller: _emailController,
+                      keyboardType: TextInputType.emailAddress,
+                      decoration: const InputDecoration(
+                        labelText: 'Email',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: ValidationHelpers.validateEmail,
+                      autovalidateMode: AutovalidateMode.onUserInteraction,
+                    ),
+                    const SizedBox(height: UiConstants.spacingSmall + 4),
+                    TextFormField(
+                      controller: _passwordController,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Password',
+                        border: OutlineInputBorder(),
+                      ),
+                      validator: (value) =>
+                          ValidationHelpers.validatePassword(value, minLength: 6),
+                      autovalidateMode: AutovalidateMode.onUserInteraction,
+                    ),
+                    const SizedBox(height: UiConstants.spacingSmall + 4),
+                    if (_errorText != null) ...[
+                      Text(
+                        _errorText!,
+                        style: const TextStyle(color: Colors.red, fontSize: 12),
+                      ),
+                      const SizedBox(height: UiConstants.spacingSmall),
+                    ],
+                    ElevatedButton(
+                      onPressed: _loading ? null : _signIn,
+                      child: _loading
+                          ? const SizedBox(
+                              height: 18,
+                              width: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Sign in'),
+                    ),
+                    const SizedBox(height: UiConstants.spacingSmall),
+                    OutlinedButton(
+                      onPressed: _loading ? null : _signUp,
+                      child: const Text('Sign up'),
+                    ),
                   ],
-                  ElevatedButton(
-                    onPressed: _loading ? null : _signIn,
-                    child: _loading
-                        ? const SizedBox(
-                            height: 18,
-                            width: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Sign in'),
-                  ),
-                  const SizedBox(height: 8),
-                  OutlinedButton(
-                    onPressed: _loading ? null : _signUp,
-                    child: const Text('Sign up'),
-                  ),
-                ],
+                ),
               ),
             ),
           ),

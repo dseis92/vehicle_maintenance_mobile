@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../constants/app_constants.dart';
+import '../services/auth_service.dart';
+import '../services/vehicle_service.dart';
+import '../services/reminder_service.dart';
+import '../services/device_service.dart';
+import '../utils/date_helpers.dart';
+import '../utils/reminder_helpers.dart';
 import 'vehicle_details_page.dart';
 import 'reminders_page.dart';
-
-final supabase = Supabase.instance.client;
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -49,22 +54,18 @@ class _DashboardPageState extends State<DashboardPage> {
     });
 
     try {
-      final user = supabase.auth.currentUser;
+      final user = AuthService().currentUser;
       if (user == null) {
-        setState(() {
-          _errorText = 'No user logged in.';
-        });
+        if (mounted) {
+          setState(() {
+            _errorText = 'No user logged in.';
+          });
+        }
         return;
       }
 
       // ---- Load vehicles ----
-      final vehiclesResp = await supabase
-          .from('vehicles')
-          .select()
-          .eq('user_id', user.id);
-
-      final vehiclesList =
-          (vehiclesResp as List<dynamic>? ?? []).cast<Map<String, dynamic>>();
+      final vehiclesList = await VehicleService().getVehicles();
       _vehicleCount = vehiclesList.length;
 
       final Map<String, Map<String, dynamic>> vehiclesById = {};
@@ -76,16 +77,7 @@ class _DashboardPageState extends State<DashboardPage> {
       }
 
       // ---- Load active reminders ----
-      final remindersResp = await supabase
-          .from('reminders')
-          .select(
-            'id, user_id, vehicle_id, type, reminder_type, next_due_date, next_due_odometer, interval_days, interval_miles, is_active',
-          )
-          .eq('user_id', user.id)
-          .eq('is_active', true);
-
-      final remindersList =
-          (remindersResp as List<dynamic>? ?? []).cast<Map<String, dynamic>>();
+      final remindersList = await ReminderService().getReminders();
       _activeRemindersCount = remindersList.length;
 
       // ---- Classify reminders: Overdue / Due soon / Upcoming ----
@@ -97,17 +89,17 @@ class _DashboardPageState extends State<DashboardPage> {
         final vehicleId = r['vehicle_id'] as String?;
         final vehicle = vehicleId != null ? vehiclesById[vehicleId] : null;
 
-        final status = _statusForReminder(r, vehicle);
+        final status = ReminderHelpers.calculateStatus(r, vehicle);
         final item = {
           'reminder': r,
           'vehicle': vehicle,
         };
 
-        if (status == 'Overdue') {
+        if (status == ReminderStatus.overdue) {
           _overdueReminders.add(item);
-        } else if (status == 'Due soon') {
+        } else if (status == ReminderStatus.dueSoon) {
           _dueSoonReminders.add(item);
-        } else if (status == 'Upcoming') {
+        } else if (status == ReminderStatus.upcoming) {
           _upcomingReminders.add(item);
         }
       }
@@ -118,159 +110,55 @@ class _DashboardPageState extends State<DashboardPage> {
       // ---- IoT summary: vehicles with devices & stale devices ----
       await _loadIoTSummary(user.id);
     } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = e.message;
+        });
+      }
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Unexpected error: $e';
+        });
+      }
     } finally {
-      setState(() {
-        _loading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
     }
   }
 
   Future<void> _loadIoTSummary(String userId) async {
     // Get all device links for this user
-    final linksResp = await supabase
-        .from('device_links')
-        .select('vehicle_id, device_id')
-        .eq('user_id', userId);
-
-    final linksList =
-        (linksResp as List<dynamic>? ?? []).cast<Map<String, dynamic>>();
+    final linksList = await DeviceService().getDeviceLinks();
 
     if (linksList.isEmpty) {
-      setState(() {
-        _vehiclesWithDevices = 0;
-        _staleDevices = 0;
-      });
+      if (mounted) {
+        setState(() {
+          _vehiclesWithDevices = 0;
+          _staleDevices = 0;
+        });
+      }
       return;
     }
 
     // Count distinct vehicles with at least one device
     final vehicleIds = <String>{};
-    final deviceIds = <String>{};
     for (final l in linksList) {
       final vId = l['vehicle_id'] as String?;
-      final dId = l['device_id'] as String?;
       if (vId != null) vehicleIds.add(vId);
-      if (dId != null) deviceIds.add(dId);
     }
 
-    final now = DateTime.now().toUtc();
-    final cutoff = now.subtract(const Duration(hours: 24));
+    // Get stale device count
+    final staleCount = await DeviceService().getStaleDeviceCount();
 
-    // For stale detection: check last telemetry per device
-    int staleCount = 0;
-    for (final dId in deviceIds) {
-      final telemetryResp = await supabase
-          .from('telemetry_events')
-          .select('recorded_at')
-          .eq('user_id', userId)
-          .eq('device_id', dId)
-          .order('recorded_at', ascending: false)
-          .limit(1)
-          .maybeSingle();
-
-      if (telemetryResp == null) {
-        // No telemetry at all -> stale
-        staleCount++;
-        continue;
-      }
-
-      final recordedAtStr = telemetryResp['recorded_at'] as String?;
-      if (recordedAtStr == null) {
-        staleCount++;
-        continue;
-      }
-
-      try {
-        final recordedAt = DateTime.parse(recordedAtStr).toUtc();
-        if (recordedAt.isBefore(cutoff)) {
-          staleCount++;
-        }
-      } catch (_) {
-        staleCount++;
-      }
-    }
-
-    setState(() {
-      _vehiclesWithDevices = vehicleIds.length;
-      _staleDevices = staleCount;
-    });
-  }
-
-  String _formatDate(String? isoString) {
-    if (isoString == null) return 'No date';
-    try {
-      final d = DateTime.parse(isoString);
-      return '${d.month}/${d.day}/${d.year}';
-    } catch (_) {
-      return isoString;
-    }
-  }
-
-  String _statusForReminder(
-    Map<String, dynamic> reminder,
-    Map<String, dynamic>? vehicle,
-  ) {
-    final isActive = (reminder['is_active'] as bool?) ?? true;
-    if (!isActive) return 'Inactive';
-
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-
-    final nextDateStr = reminder['next_due_date'] as String?;
-    DateTime? nextDate;
-    if (nextDateStr != null) {
-      try {
-        nextDate = DateTime.parse(nextDateStr);
-      } catch (_) {}
-    }
-
-    final nextOdo = reminder['next_due_odometer'] as num?;
-    final vehicleOdo =
-        vehicle != null ? vehicle['current_odometer'] as num? : null;
-
-    bool overdue = false;
-    bool soon = false;
-
-    if (nextDate != null) {
-      final dDay = DateTime(nextDate.year, nextDate.month, nextDate.day);
-      if (dDay.isBefore(today)) {
-        overdue = true;
-      } else if (dDay == today) {
-        soon = true;
-      }
-    }
-
-    if (nextOdo != null && vehicleOdo != null) {
-      final remaining = nextOdo - vehicleOdo;
-      if (remaining < 0) {
-        overdue = true;
-      } else if (remaining <= 200) {
-        soon = true;
-      }
-    }
-
-    if (overdue) return 'Overdue';
-    if (soon) return 'Due soon';
-    return 'Upcoming';
-  }
-
-  Color _statusColor(String status) {
-    switch (status) {
-      case 'Overdue':
-        return Colors.red;
-      case 'Due soon':
-        return Colors.orange;
-      case 'Inactive':
-        return Colors.grey;
-      default:
-        return Colors.blue;
+    if (mounted) {
+      setState(() {
+        _vehiclesWithDevices = vehicleIds.length;
+        _staleDevices = staleCount;
+      });
     }
   }
 
@@ -294,18 +182,23 @@ class _DashboardPageState extends State<DashboardPage> {
 
   Future<void> _markReminderDone(String reminderId) async {
     try {
-      await supabase
-          .from('reminders')
-          .update({'is_active': false}).eq('id', reminderId);
+      await ReminderService().updateReminder(
+        reminderId,
+        {'is_active': false},
+      );
       await _loadData();
     } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = e.message;
+        });
+      }
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Unexpected error: $e';
+        });
+      }
     }
   }
 
@@ -313,11 +206,14 @@ class _DashboardPageState extends State<DashboardPage> {
     return Card(
       elevation: 1,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
       ),
-      margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+      margin: EdgeInsets.symmetric(
+        vertical: UiConstants.spacingSmall,
+        horizontal: 4,
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: EdgeInsets.all(UiConstants.spacingMedium),
         child: Column(
           children: [
             Row(
@@ -326,18 +222,18 @@ class _DashboardPageState extends State<DashboardPage> {
                   label: 'Vehicles',
                   value: _vehicleCount.toString(),
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: UiConstants.spacingMedium),
                 _buildStatItem(
                   label: 'Active reminders',
                   value: _activeRemindersCount.toString(),
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: UiConstants.spacingMedium),
                 _buildStatItem(
                   label: 'Overdue',
                   value: _overdueCount.toString(),
                   color: Colors.red,
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: UiConstants.spacingMedium),
                 _buildStatItem(
                   label: 'Due soon',
                   value: _dueSoonCount.toString(),
@@ -345,7 +241,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 ),
               ],
             ),
-            const SizedBox(height: 8),
+            SizedBox(height: UiConstants.spacingSmall),
             const Divider(height: 16),
             Row(
               children: [
@@ -354,7 +250,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   value: _vehiclesWithDevices.toString(),
                   color: Colors.blueGrey,
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: UiConstants.spacingMedium),
                 _buildStatItem(
                   label: 'Stale devices (24h+)',
                   value: _staleDevices.toString(),
@@ -410,9 +306,9 @@ class _DashboardPageState extends State<DashboardPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SizedBox(height: 12),
+        SizedBox(height: UiConstants.spacingMedium),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
+          padding: EdgeInsets.symmetric(horizontal: UiConstants.spacingSmall),
           child: Text(
             title,
             style: const TextStyle(
@@ -438,11 +334,11 @@ class _DashboardPageState extends State<DashboardPage> {
         (reminder['reminder_type'] ?? reminder['type']) as String? ??
             'Reminder';
     final nextDateStr =
-        _formatDate(reminder['next_due_date'] as String?);
+        DateHelpers.formatDate(reminder['next_due_date'] as String?);
     final nextOdo = reminder['next_due_odometer'] as num?;
     final vehicleTitle = _vehicleTitle(vehicle);
-    final status = _statusForReminder(reminder, vehicle);
-    final statusColor = _statusColor(status);
+    final status = ReminderHelpers.calculateStatus(reminder, vehicle);
+    final statusColor = ReminderHelpers.getStatusColor(status);
 
     String subtitle = 'Next date: $nextDateStr';
     if (nextOdo != null) {
@@ -452,11 +348,11 @@ class _DashboardPageState extends State<DashboardPage> {
     return Card(
       elevation: 1,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
       ),
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: EdgeInsets.all(UiConstants.spacingMedium),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -473,13 +369,13 @@ class _DashboardPageState extends State<DashboardPage> {
                   ),
                 ),
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: UiConstants.spacingSmall,
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(999),
-                    color: statusColor.withOpacity(0.12),
+                    color: statusColor.withValues(alpha: 0.12),
                   ),
                   child: Text(
                     status,
@@ -508,7 +404,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 color: Colors.grey,
               ),
             ),
-            const SizedBox(height: 8),
+            SizedBox(height: UiConstants.spacingSmall),
             Row(
               children: [
                 if (id != null)
@@ -523,7 +419,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       style: TextStyle(fontSize: 12),
                     ),
                   ),
-                const SizedBox(width: 8),
+                SizedBox(width: UiConstants.spacingSmall),
                 if (vehicle != null)
                   TextButton.icon(
                     onPressed: () {
@@ -579,7 +475,7 @@ class _DashboardPageState extends State<DashboardPage> {
           child: _loading
               ? const Center(child: CircularProgressIndicator())
               : ListView(
-                  padding: const EdgeInsets.all(8),
+                  padding: EdgeInsets.all(UiConstants.spacingSmall),
                   children: [
                     if (_errorText != null) ...[
                       Padding(
@@ -609,9 +505,9 @@ class _DashboardPageState extends State<DashboardPage> {
                     if (_overdueReminders.isEmpty &&
                         _dueSoonReminders.isEmpty &&
                         _upcomingReminders.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.all(16),
-                        child: Text(
+                      Padding(
+                        padding: EdgeInsets.all(UiConstants.spacingMedium),
+                        child: const Text(
                           'No active reminders yet. Add reminders from a vehicle to see them here.',
                           style: TextStyle(
                             fontSize: 13,

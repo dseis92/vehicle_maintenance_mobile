@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../constants/app_constants.dart';
+import '../services/auth_service.dart';
+import '../services/vehicle_service.dart';
+import '../services/service_event_service.dart';
+import '../services/device_service.dart';
+import '../services/reminder_service.dart';
+import '../utils/date_helpers.dart';
+import '../utils/number_helpers.dart';
+import '../utils/validation_helpers.dart';
 import 'reminders_page.dart';
 import 'dashboard_page.dart';
-
-final supabase = Supabase.instance.client;
 
 class VehicleDetailsPage extends StatefulWidget {
   final Map<String, dynamic> vehicle;
@@ -16,6 +22,11 @@ class VehicleDetailsPage extends StatefulWidget {
 }
 
 class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
+  final _vehicleService = VehicleService();
+  final _serviceEventService = ServiceEventService();
+  final _deviceService = DeviceService();
+  final _authService = AuthService();
+
   bool _loading = true;
   String? _errorText;
   List<Map<String, dynamic>> _serviceEvents = [];
@@ -55,179 +66,125 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
     super.dispose();
   }
 
-  Map<String, dynamic> get _vehicleData =>
-      _vehicleRow ?? widget.vehicle;
+  Map<String, dynamic> get _vehicleData => _vehicleRow ?? widget.vehicle;
 
   Future<void> _loadVehicleRow() async {
     final vehicleId = widget.vehicle['id'] as String?;
     if (vehicleId == null) return;
 
     try {
-      final resp = await supabase
-          .from('vehicles')
-          .select()
-          .eq('id', vehicleId)
-          .maybeSingle();
-
-      if (resp != null) {
+      final vehicle = await _vehicleService.getVehicle(vehicleId);
+      if (vehicle != null && mounted) {
         setState(() {
-          _vehicleRow =
-              Map<String, dynamic>.from(resp as Map<dynamic, dynamic>);
+          _vehicleRow = vehicle;
         });
       }
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText ??= e.message;
-      });
     } catch (e) {
-      setState(() {
-        _errorText ??= 'Unexpected error loading vehicle: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText ??= 'Error loading vehicle: $e';
+        });
+      }
     }
   }
 
   Future<void> _loadServiceEvents() async {
-    setState(() {
-      _loading = true;
-      _errorText = null;
-    });
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _errorText = null;
+      });
+    }
 
     try {
       final vehicleId = widget.vehicle['id'] as String?;
       if (vehicleId == null) {
-        setState(() {
-          _errorText = 'Vehicle ID missing.';
-          _serviceEvents = [];
-        });
+        if (mounted) {
+          setState(() {
+            _errorText = 'Vehicle ID missing.';
+            _serviceEvents = [];
+          });
+        }
         return;
       }
 
-      final resp = await supabase
-          .from('service_events')
-          .select()
-          .eq('vehicle_id', vehicleId)
-          .order('service_date', ascending: false)
-          .order('created_at', ascending: false);
-
-      final list =
-          (resp as List<dynamic>? ?? []).cast<Map<String, dynamic>>();
-
-      setState(() {
-        _serviceEvents = list;
-      });
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-        _serviceEvents = [];
-      });
+      final events = await _serviceEventService.getServiceEventsForVehicle(vehicleId);
+      if (mounted) {
+        setState(() {
+          _serviceEvents = events;
+        });
+      }
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-        _serviceEvents = [];
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Error loading service events: $e';
+          _serviceEvents = [];
+        });
+      }
     } finally {
-      setState(() {
-        _loading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
     }
   }
 
   Future<void> _loadIoTData() async {
     final vehicleId = widget.vehicle['id'] as String?;
     if (vehicleId == null) {
-      setState(() {
-        _deviceLinks = [];
-        _latestTelemetry = null;
-      });
-      return;
-    }
-
-    setState(() {
-      _iotLoading = true;
-    });
-
-    try {
-      final user = supabase.auth.currentUser;
-      if (user == null) {
+      if (mounted) {
         setState(() {
           _deviceLinks = [];
           _latestTelemetry = null;
         });
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _iotLoading = true;
+      });
+    }
+
+    try {
+      final user = _authService.currentUser;
+      if (user == null) {
+        if (mounted) {
+          setState(() {
+            _deviceLinks = [];
+            _latestTelemetry = null;
+          });
+        }
         return;
       }
 
       // Device links for this vehicle
-      final linksResp = await supabase
-          .from('device_links')
-          .select()
-          .eq('user_id', user.id)
-          .eq('vehicle_id', vehicleId)
-          .order('created_at', ascending: true);
-
-      final linksList =
-          (linksResp as List<dynamic>? ?? []).cast<Map<String, dynamic>>();
+      final links = await _deviceService.getDeviceLinksForVehicle(vehicleId);
 
       // Latest telemetry event for this vehicle
-      final telemetryResp = await supabase
-          .from('telemetry_events')
-          .select()
-          .eq('user_id', user.id)
-          .eq('vehicle_id', vehicleId)
-          .order('recorded_at', ascending: false)
-          .limit(1)
-          .maybeSingle();
+      final telemetry = await _deviceService.getLatestTelemetry(vehicleId);
 
-      Map<String, dynamic>? latest;
-      if (telemetryResp != null) {
-        latest =
-            Map<String, dynamic>.from(telemetryResp as Map<dynamic, dynamic>);
+      if (mounted) {
+        setState(() {
+          _deviceLinks = links;
+          _latestTelemetry = telemetry;
+        });
       }
-
-      setState(() {
-        _deviceLinks = linksList;
-        _latestTelemetry = latest;
-      });
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText ??= e.message;
-      });
     } catch (e) {
-      setState(() {
-        _errorText ??= 'Unexpected IoT error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText ??= 'Error loading IoT data: $e';
+        });
+      }
     } finally {
-      setState(() {
-        _iotLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _iotLoading = false;
+        });
+      }
     }
-  }
-
-  String _formatDate(String? isoString) {
-    if (isoString == null) return 'Unknown date';
-    try {
-      final d = DateTime.parse(isoString);
-      return '${d.month}/${d.day}/${d.year}';
-    } catch (_) {
-      return isoString;
-    }
-  }
-
-  String _formatDateTime(String? isoString) {
-    if (isoString == null) return 'Unknown';
-    try {
-      final d = DateTime.parse(isoString).toLocal();
-      final date = '${d.month}/${d.day}/${d.year}';
-      final time =
-          '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-      return '$date • $time';
-    } catch (_) {
-      return isoString;
-    }
-  }
-
-  String _formatCurrency(num? value) {
-    if (value == null) return '-';
-    return '\$${value.toStringAsFixed(2)}';
   }
 
   // ====== ADD SERVICE EVENT ======
@@ -262,8 +219,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
               }
             }
 
-            final dateLabel =
-                '${_serviceDate.month}/${_serviceDate.day}/${_serviceDate.year}';
+            final dateLabel = DateHelpers.formatDate(_serviceDate.toIso8601String());
 
             return AlertDialog(
               title: const Text('Add service event'),
@@ -289,42 +245,13 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         onPressed: pickServiceDate,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     DropdownButtonFormField<String>(
-                      value: _serviceCategory,
+                      initialValue: _serviceCategory,
                       decoration: const InputDecoration(
                         labelText: 'Category',
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'Oil change',
-                          child: Text('Oil change'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Tire rotation',
-                          child: Text('Tire rotation'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Charge rotation',
-                          child: Text('Charge rotation'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Brake service',
-                          child: Text('Brake service'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Inspection',
-                          child: Text('Inspection'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Car wash / Detail',
-                          child: Text('Car wash / Detail'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Other',
-                          child: Text('Other'),
-                        ),
-                      ],
+                      items: MaintenanceCategories.getDropdownItems(),
                       onChanged: (value) {
                         if (value == null) return;
                         setLocalState(() {
@@ -332,7 +259,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         });
                       },
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     TextField(
                       controller: _odometerController,
                       keyboardType: TextInputType.number,
@@ -355,7 +282,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                           },
                           icon: const Icon(Icons.speed, size: 16),
                           label: Text(
-                            'Use latest from device (${(latest['odometer'] as num).toInt()})',
+                            'Use latest from device (${NumberHelpers.formatOdometer(latest['odometer'] as num?, _vehicleRow?['odometer_unit'] as String? ?? OdometerUnits.miles)})',
                             style: const TextStyle(fontSize: 12),
                           ),
                         ),
@@ -364,7 +291,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                       Align(
                         alignment: Alignment.centerLeft,
                         child: Text(
-                          'Last reading: ${_formatDateTime(latest['recorded_at'] as String?)}',
+                          'Last reading: ${DateHelpers.formatDate(latest['recorded_at'] as String?)}',
                           style: const TextStyle(
                             fontSize: 11,
                             color: Colors.grey,
@@ -372,7 +299,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         ),
                       ),
                     ],
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     TextField(
                       controller: _costController,
                       keyboardType:
@@ -384,7 +311,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         prefixText: '\$',
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     TextField(
                       controller: _performedByController,
                       decoration: const InputDecoration(
@@ -392,7 +319,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         hintText: 'Self or shop name',
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     TextField(
                       controller: _notesController,
                       maxLines: 3,
@@ -433,17 +360,21 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
   Future<void> _saveServiceEvent() async {
     final vehicleId = widget.vehicle['id'] as String?;
     if (vehicleId == null) {
-      setState(() {
-        _errorText = 'Vehicle ID missing.';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Vehicle ID missing.';
+        });
+      }
       return;
     }
 
-    final user = supabase.auth.currentUser;
+    final user = _authService.currentUser;
     if (user == null) {
-      setState(() {
-        _errorText = 'No user logged in.';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'No user logged in.';
+        });
+      }
       return;
     }
 
@@ -452,91 +383,106 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
     final performedBy = _performedByController.text.trim();
     final notes = _notesController.text.trim();
 
-    int? odometerValue;
+    // Validate odometer
     if (odoText.isNotEmpty) {
-      odometerValue = int.tryParse(odoText.replaceAll(',', ''));
-      if (odometerValue == null) {
-        setState(() {
-          _errorText = 'Odometer must be a number.';
-        });
+      final error = ValidationHelpers.validateOdometer(odoText);
+      if (error != null) {
+        if (mounted) {
+          setState(() {
+            _errorText = error;
+          });
+        }
         return;
       }
+    }
+
+    // Validate cost
+    if (costText.isNotEmpty) {
+      final error = ValidationHelpers.validateCost(costText);
+      if (error != null) {
+        if (mounted) {
+          setState(() {
+            _errorText = error;
+          });
+        }
+        return;
+      }
+    }
+
+    // Parse values
+    int? odometerValue;
+    if (odoText.isNotEmpty) {
+      odometerValue = NumberHelpers.parseNumber(odoText)?.toInt();
     }
 
     num? costValue;
     if (costText.isNotEmpty) {
-      costValue = num.tryParse(costText.replaceAll(',', ''));
-      if (costValue == null) {
-        setState(() {
-          _errorText = 'Cost must be a number.';
-        });
-        return;
-      }
+      costValue = NumberHelpers.parseNumber(costText);
     }
 
-    setState(() {
-      _savingEvent = true;
-      _errorText = null;
-    });
+    if (mounted) {
+      setState(() {
+        _savingEvent = true;
+        _errorText = null;
+      });
+    }
 
     try {
-      await supabase.from('service_events').insert({
-        'user_id': user.id,
-        'vehicle_id': vehicleId,
-        'service_date': _serviceDate.toIso8601String(),
-        'category': _serviceCategory,
-        'odometer': odometerValue,
-        'cost': costValue,
-        'performed_by': performedBy.isNotEmpty ? performedBy : null,
-        'notes': notes.isNotEmpty ? notes : null,
-      });
+      await _serviceEventService.createServiceEvent(
+        vehicleId: vehicleId,
+        serviceDate: _serviceDate.toIso8601String(),
+        category: _serviceCategory,
+        odometer: odometerValue,
+        cost: costValue,
+        performedBy: performedBy.isNotEmpty ? performedBy : null,
+        notes: notes.isNotEmpty ? notes : null,
+      );
 
       await _loadServiceEvents();
       if (mounted) {
         Navigator.of(context).pop(); // close dialog
       }
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Error saving service event: $e';
+        });
+      }
     } finally {
-      setState(() {
-        _savingEvent = false;
-      });
+      if (mounted) {
+        setState(() {
+          _savingEvent = false;
+        });
+      }
     }
   }
 
   Future<void> _deleteServiceEvent(String id) async {
     try {
-      await supabase.from('service_events').delete().eq('id', id);
+      await _serviceEventService.deleteServiceEvent(id);
       await _loadServiceEvents();
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Error deleting service event: $e';
+        });
+      }
     }
   }
 
   void _showServiceEventDetails(Map<String, dynamic> e) {
     final category = e['category'] as String? ?? 'Service';
-    final dateStr = _formatDate(e['service_date'] as String?);
+    final dateStr = DateHelpers.formatDate(e['service_date'] as String?);
     final odo = e['odometer'] as num?;
     final cost = e['cost'] as num?;
     final performedBy = e['performed_by'] as String?;
     final notes = e['notes'] as String?;
     final id = e['id'] as String?;
 
+    final unit = _vehicleRow?['odometer_unit'] as String? ?? OdometerUnits.miles;
     String odoText = 'Odometer: not recorded';
     if (odo != null) {
-      odoText = 'Odometer: ${odo.toInt()}';
+      odoText = 'Odometer: ${NumberHelpers.formatOdometer(odo, unit)}';
     }
 
     showDialog(
@@ -561,7 +507,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                 if (cost != null) ...[
                   const SizedBox(height: 4),
                   Text(
-                    'Cost: ${_formatCurrency(cost)}',
+                    'Cost: ${NumberHelpers.formatCurrency(cost)}',
                     style: const TextStyle(fontSize: 13),
                   ),
                 ],
@@ -643,27 +589,6 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
 
   // ====== VEHICLE HEADER / EDIT / DELETE ======
 
-  String _vehicleTypeLabel(String? type) {
-    switch (type) {
-      case 'car':
-        return 'Car';
-      case 'truck':
-        return 'Truck';
-      case 'van':
-        return 'Van';
-      case 'motorcycle':
-        return 'Motorcycle';
-      case 'golf_cart':
-        return 'Golf Cart';
-      case 'equipment':
-        return 'Equipment';
-      case 'other':
-        return 'Other';
-      default:
-        return '';
-    }
-  }
-
   Widget _buildVehicleHeader(BuildContext context) {
     final v = _vehicleData;
     final name = v['name'] as String? ?? 'Vehicle';
@@ -673,7 +598,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
     final trim = v['trim'] as String?;
     final type = v['vehicle_type'] as String? ?? '';
     final currentOdo = v['current_odometer'] as num?;
-    final unit = v['odometer_unit'] as String? ?? 'mi';
+    final unit = v['odometer_unit'] as String? ?? OdometerUnits.miles;
 
     final subtitleParts = <String>[];
     if (year != null && year.isNotEmpty) subtitleParts.add(year);
@@ -682,11 +607,11 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
     if (trim != null && trim.isNotEmpty) subtitleParts.add(trim);
     final subtitle = subtitleParts.join(' ');
 
-    String typeLabel = _vehicleTypeLabel(type);
+    String typeLabel = VehicleTypes.getLabel(type);
 
     String odoText;
     if (currentOdo != null) {
-      odoText = '${currentOdo.toInt()} $unit';
+      odoText = NumberHelpers.formatOdometer(currentOdo, unit);
     } else {
       odoText = 'Odometer not set';
     }
@@ -694,23 +619,23 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
     return Card(
       elevation: 1,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
       ),
       margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: EdgeInsets.all(UiConstants.spacingMedium - 2),
         child: Row(
           children: [
             CircleAvatar(
               radius: 24,
               backgroundColor:
-                  Theme.of(context).colorScheme.primary.withOpacity(0.1),
+                  Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
               child: Icon(
                 Icons.directions_car,
                 color: Theme.of(context).colorScheme.primary,
               ),
             ),
-            const SizedBox(width: 12),
+            SizedBox(width: UiConstants.spacingMedium - 4),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -766,7 +691,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
     String odo = v['current_odometer'] != null
         ? (v['current_odometer'] as num).toInt().toString()
         : '';
-    String unit = (v['odometer_unit'] as String?) ?? 'mi';
+    String unit = (v['odometer_unit'] as String?) ?? OdometerUnits.miles;
     String notes = v['notes'] as String? ?? '';
 
     showDialog(
@@ -788,13 +713,25 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
               if (saving) return;
 
               final vName = nameController.text.trim();
-              if (vName.isEmpty) {
+
+              // Validate required fields
+              final nameError = ValidationHelpers.validateRequired(vName, 'Vehicle name');
+              if (nameError != null) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Vehicle name is required.'),
-                  ),
+                  SnackBar(content: Text(nameError)),
                 );
                 return;
+              }
+
+              // Validate odometer if provided
+              if (odoController.text.trim().isNotEmpty) {
+                final odoError = ValidationHelpers.validateOdometer(odoController.text.trim());
+                if (odoError != null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(odoError)),
+                  );
+                  return;
+                }
               }
 
               int? yearInt;
@@ -803,51 +740,48 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
               }
               num? odoNum;
               if (odoController.text.trim().isNotEmpty) {
-                odoNum = num.tryParse(
-                  odoController.text.trim().replaceAll(',', ''),
-                );
+                odoNum = NumberHelpers.parseNumber(odoController.text.trim());
               }
 
               setLocalState(() => saving = true);
 
               try {
-                await supabase
-                    .from('vehicles')
-                    .update({
-                      'name': vName,
-                      'vehicle_type': vehicleType,
-                      'year': yearInt,
-                      'make': makeController.text.trim().isNotEmpty
-                          ? makeController.text.trim()
-                          : null,
-                      'model': modelController.text.trim().isNotEmpty
-                          ? modelController.text.trim()
-                          : null,
-                      'trim': trimController.text.trim().isNotEmpty
-                          ? trimController.text.trim()
-                          : null,
-                      'current_odometer': odoNum,
-                      'odometer_unit': unit,
-                      'notes': notesController.text.trim().isNotEmpty
-                          ? notesController.text.trim()
-                          : null,
-                    })
-                    .eq('id', widget.vehicle['id']);
+                final updates = <String, dynamic>{
+                  'name': vName,
+                  'vehicle_type': vehicleType,
+                  'year': yearInt?.toString(),
+                  'make': makeController.text.trim().isNotEmpty
+                      ? makeController.text.trim()
+                      : null,
+                  'model': modelController.text.trim().isNotEmpty
+                      ? modelController.text.trim()
+                      : null,
+                  'trim': trimController.text.trim().isNotEmpty
+                      ? trimController.text.trim()
+                      : null,
+                  'current_odometer': odoNum,
+                  'odometer_unit': unit,
+                  'notes': notesController.text.trim().isNotEmpty
+                      ? notesController.text.trim()
+                      : null,
+                };
+
+                await _vehicleService.updateVehicle(
+                  widget.vehicle['id'] as String,
+                  updates,
+                );
 
                 if (context.mounted) {
                   Navigator.of(context).pop();
                 }
                 await _loadVehicleRow();
-              } on PostgrestException catch (e) {
-                setLocalState(() => saving = false);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(e.message)),
-                );
               } catch (e) {
                 setLocalState(() => saving = false);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Error: $e')),
-                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Error: $e')),
+                  );
+                }
               }
             }
 
@@ -864,48 +798,19 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         hintText: 'e.g. Dually, Shop Truck',
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     DropdownButtonFormField<String>(
-                      value: vehicleType,
+                      initialValue: vehicleType,
                       decoration: const InputDecoration(
                         labelText: 'Type',
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'car',
-                          child: Text('Car'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'truck',
-                          child: Text('Truck'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'van',
-                          child: Text('Van'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'motorcycle',
-                          child: Text('Motorcycle'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'golf_cart',
-                          child: Text('Golf Cart'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'equipment',
-                          child: Text('Equipment'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'other',
-                          child: Text('Other'),
-                        ),
-                      ],
+                      items: VehicleTypes.getDropdownItems(),
                       onChanged: (vType) {
                         if (vType == null) return;
                         setLocalState(() => vehicleType = vType);
                       },
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     Row(
                       children: [
                         Expanded(
@@ -917,7 +822,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        SizedBox(width: UiConstants.spacingSmall),
                         Expanded(
                           child: TextField(
                             controller: makeController,
@@ -926,7 +831,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        SizedBox(width: UiConstants.spacingSmall),
                         Expanded(
                           child: TextField(
                             controller: modelController,
@@ -937,14 +842,14 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     TextField(
                       controller: trimController,
                       decoration: const InputDecoration(
                         labelText: 'Trim (optional)',
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     Row(
                       children: [
                         Expanded(
@@ -956,17 +861,17 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        SizedBox(width: UiConstants.spacingSmall),
                         DropdownButton<String>(
                           value: unit,
                           items: const [
                             DropdownMenuItem(
-                              value: 'mi',
-                              child: Text('mi'),
+                              value: OdometerUnits.miles,
+                              child: Text(OdometerUnits.miles),
                             ),
                             DropdownMenuItem(
-                              value: 'km',
-                              child: Text('km'),
+                              value: OdometerUnits.kilometers,
+                              child: Text(OdometerUnits.kilometers),
                             ),
                           ],
                           onChanged: (vUnit) {
@@ -976,7 +881,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     TextField(
                       controller: notesController,
                       maxLines: 3,
@@ -1018,37 +923,17 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
     if (vehicleId == null) return;
 
     try {
-      // Clean up related data first (if no ON DELETE CASCADE)
-      await supabase
-          .from('service_events')
-          .delete()
-          .eq('vehicle_id', vehicleId);
-      await supabase
-          .from('reminders')
-          .delete()
-          .eq('vehicle_id', vehicleId);
-      await supabase
-          .from('device_links')
-          .delete()
-          .eq('vehicle_id', vehicleId);
-      await supabase
-          .from('telemetry_events')
-          .delete()
-          .eq('vehicle_id', vehicleId);
-
-      await supabase.from('vehicles').delete().eq('id', vehicleId);
+      await _vehicleService.deleteVehicle(vehicleId);
 
       if (mounted) {
         Navigator.of(context).pop(); // pop details page
       }
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error deleting vehicle: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Error deleting vehicle: $e';
+        });
+      }
     }
   }
 
@@ -1089,19 +974,6 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
 
   // ====== IOT SECTION ======
 
-  String _deviceTypeLabel(String type) {
-    switch (type) {
-      case 'obd':
-        return 'OBD device';
-      case 'battery_monitor':
-        return 'Battery monitor';
-      case 'tracker':
-        return 'Tracker';
-      default:
-        return 'Other device';
-    }
-  }
-
   Future<void> _showLinkDeviceDialog() async {
     final vehicleId = widget.vehicle['id'] as String?;
     if (vehicleId == null) {
@@ -1111,7 +983,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
       return;
     }
 
-    final user = supabase.auth.currentUser;
+    final user = _authService.currentUser;
     if (user == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No user logged in.')),
@@ -1133,11 +1005,12 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
               if (saving) return;
 
               final deviceId = deviceIdController.text.trim();
-              if (deviceId.isEmpty) {
+
+              // Validate required field
+              final error = ValidationHelpers.validateRequired(deviceId, 'Device ID');
+              if (error != null) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Device ID is required.'),
-                  ),
+                  SnackBar(content: Text(error)),
                 );
                 return;
               }
@@ -1145,30 +1018,26 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
               setLocalState(() => saving = true);
 
               try {
-                await supabase.from('device_links').insert({
-                  'user_id': user.id,
-                  'vehicle_id': vehicleId,
-                  'device_id': deviceId,
-                  'device_type': deviceType,
-                  'nickname': nicknameController.text.trim().isNotEmpty
+                await _deviceService.createDeviceLink(
+                  vehicleId: vehicleId,
+                  deviceId: deviceId,
+                  deviceType: deviceType,
+                  nickname: nicknameController.text.trim().isNotEmpty
                       ? nicknameController.text.trim()
                       : null,
-                });
+                );
 
                 if (context.mounted) {
                   Navigator.of(context).pop();
                 }
                 await _loadIoTData();
-              } on PostgrestException catch (e) {
-                setLocalState(() => saving = false);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(e.message)),
-                );
               } catch (e) {
                 setLocalState(() => saving = false);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Error: $e')),
-                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Error: $e')),
+                  );
+                }
               }
             }
 
@@ -1179,34 +1048,17 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     DropdownButtonFormField<String>(
-                      value: deviceType,
+                      initialValue: deviceType,
                       decoration: const InputDecoration(
                         labelText: 'Device type',
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'obd',
-                          child: Text('OBD / telematics'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'battery_monitor',
-                          child: Text('Battery monitor'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'tracker',
-                          child: Text('GPS tracker'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'other',
-                          child: Text('Other'),
-                        ),
-                      ],
+                      items: DeviceTypes.getDropdownItems(),
                       onChanged: (v) {
                         if (v == null) return;
                         setLocalState(() => deviceType = v);
                       },
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     TextField(
                       controller: deviceIdController,
                       decoration: const InputDecoration(
@@ -1214,7 +1066,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         hintText: 'Serial, BLE MAC, or external ID',
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     TextField(
                       controller: nicknameController,
                       decoration: const InputDecoration(
@@ -1259,11 +1111,11 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
       return Card(
         elevation: 1,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
         ),
         margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: EdgeInsets.all(UiConstants.spacingMedium - 4),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1272,7 +1124,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                 size: 22,
                 color: Colors.grey,
               ),
-              const SizedBox(width: 10),
+              SizedBox(width: UiConstants.spacingSmall + 2),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1292,7 +1144,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                         color: Colors.grey,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     Align(
                       alignment: Alignment.centerLeft,
                       child: OutlinedButton.icon(
@@ -1319,11 +1171,11 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
     return Card(
       elevation: 1,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
       ),
       margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: EdgeInsets.all(UiConstants.spacingMedium - 4),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1333,7 +1185,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                   Icons.sensors,
                   size: 22,
                 ),
-                const SizedBox(width: 8),
+                SizedBox(width: UiConstants.spacingSmall),
                 const Text(
                   'Devices & telemetry',
                   style: TextStyle(
@@ -1362,11 +1214,11 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
               ],
             ),
             if (_iotLoading) ...[
-              const SizedBox(height: 8),
+              SizedBox(height: UiConstants.spacingSmall),
               const LinearProgressIndicator(minHeight: 2),
             ],
             if (hasDevices) ...[
-              const SizedBox(height: 8),
+              SizedBox(height: UiConstants.spacingSmall),
               const Text(
                 'Linked devices',
                 style: TextStyle(
@@ -1379,7 +1231,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                 final type = d['device_type'] as String? ?? 'other';
                 final deviceId = d['device_id'] as String? ?? '';
                 final nickname = d['nickname'] as String?;
-                final label = _deviceTypeLabel(type);
+                final label = DeviceTypes.getLabel(type);
                 return Padding(
                   padding: const EdgeInsets.symmetric(vertical: 2),
                   child: Row(
@@ -1420,7 +1272,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
               }),
             ],
             if (latest != null) ...[
-              const SizedBox(height: 10),
+              SizedBox(height: UiConstants.spacingSmall + 2),
               const Divider(height: 16),
               const Text(
                 'Latest telemetry',
@@ -1432,12 +1284,12 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
               const SizedBox(height: 4),
               Builder(
                 builder: (_) {
-                  final recordedAt =
-                      _formatDateTime(latest['recorded_at'] as String?);
+                  final recordedAt = DateHelpers.formatDate(
+                    latest['recorded_at'] as String?,
+                  );
                   final odo = latest['odometer'] as num?;
                   final batterySoc = latest['battery_soc'] as num?;
-                  final batteryVoltage =
-                      latest['battery_voltage'] as num?;
+                  final batteryVoltage = latest['battery_voltage'] as num?;
                   final lat = latest['latitude'] as num?;
                   final lng = latest['longitude'] as num?;
 
@@ -1453,7 +1305,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                       ),
                       if (odo != null)
                         Text(
-                          'Odometer: ${odo.toInt()}',
+                          'Odometer: ${NumberHelpers.formatOdometer(odo, _vehicleRow?['odometer_unit'] as String? ?? OdometerUnits.miles)}',
                           style: const TextStyle(
                             fontSize: 12,
                           ),
@@ -1494,9 +1346,9 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
 
   Widget _buildServiceList() {
     if (_serviceEvents.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.all(12),
-        child: Text(
+      return Padding(
+        padding: EdgeInsets.all(UiConstants.spacingMedium - 4),
+        child: const Text(
           'No service history yet. Add your first service event to keep track of maintenance.',
           style: TextStyle(
             fontSize: 13,
@@ -1509,26 +1361,27 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
     return Column(
       children: _serviceEvents.map((e) {
         final category = e['category'] as String? ?? 'Service';
-        final dateStr = _formatDate(e['service_date'] as String?);
+        final dateStr = DateHelpers.formatDate(e['service_date'] as String?);
         final odo = e['odometer'] as num?;
         final cost = e['cost'] as num?;
 
+        final unit = _vehicleRow?['odometer_unit'] as String? ?? OdometerUnits.miles;
         String odoText = 'Odometer not recorded';
         if (odo != null) {
-          odoText = 'Odometer: ${odo.toInt()}';
+          odoText = 'Odometer: ${NumberHelpers.formatOdometer(odo, unit)}';
         }
 
         return InkWell(
           onTap: () => _showServiceEventDetails(e),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
           child: Card(
             elevation: 1,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
             ),
             margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: EdgeInsets.all(UiConstants.spacingMedium - 4),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1562,7 +1415,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
                   if (cost != null) ...[
                     const SizedBox(height: 2),
                     Text(
-                      'Cost: ${_formatCurrency(cost)}',
+                      'Cost: ${NumberHelpers.formatCurrency(cost)}',
                       style: const TextStyle(
                         fontSize: 12,
                         color: Colors.grey,
@@ -1580,8 +1433,7 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final name =
-        _vehicleData['name'] as String? ?? 'Vehicle details';
+    final name = _vehicleData['name'] as String? ?? 'Vehicle details';
 
     return Scaffold(
       appBar: AppBar(
@@ -1645,12 +1497,12 @@ class _VehicleDetailsPageState extends State<VehicleDetailsPage> {
           child: _loading
               ? const Center(child: CircularProgressIndicator())
               : ListView(
-                  padding: const EdgeInsets.all(12),
+                  padding: EdgeInsets.all(UiConstants.spacingMedium - 4),
                   children: [
                     _buildVehicleHeader(context),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     _buildIoTSection(),
-                    const SizedBox(height: 8),
+                    SizedBox(height: UiConstants.spacingSmall),
                     if (_errorText != null) ...[
                       Padding(
                         padding: const EdgeInsets.symmetric(

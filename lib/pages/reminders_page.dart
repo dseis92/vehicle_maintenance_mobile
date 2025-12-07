@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-
-final supabase = Supabase.instance.client;
+import '../constants/app_constants.dart';
+import '../services/auth_service.dart';
+import '../services/vehicle_service.dart';
+import '../services/reminder_service.dart';
+import '../utils/date_helpers.dart';
+import '../utils/reminder_helpers.dart';
+import '../utils/validation_helpers.dart';
 
 /// Per-vehicle reminders page.
 /// Lets you:
@@ -19,12 +23,16 @@ class RemindersPage extends StatefulWidget {
 }
 
 class _RemindersPageState extends State<RemindersPage> {
+  final _authService = AuthService();
+  final _vehicleService = VehicleService();
+  final _reminderService = ReminderService();
+
   bool _loading = true;
   String? _errorText;
   List<Map<String, dynamic>> _reminders = [];
 
   // Add reminder form state
-  String _reminderType = 'Oil change';
+  String _reminderType = MaintenanceCategories.oilChange;
   DateTime? _dueDate = DateTime.now();
   final TextEditingController _dueOdometerController =
       TextEditingController();
@@ -51,123 +59,51 @@ class _RemindersPageState extends State<RemindersPage> {
   }
 
   Future<void> _loadReminders() async {
-    setState(() {
-      _loading = true;
-      _errorText = null;
-    });
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _errorText = null;
+      });
+    }
 
     try {
       final vehicleId = widget.vehicle['id'] as String?;
       if (vehicleId == null) {
-        setState(() {
-          _errorText = 'Vehicle ID missing.';
-          _reminders = [];
-        });
+        if (mounted) {
+          setState(() {
+            _errorText = 'Vehicle ID missing.';
+            _reminders = [];
+          });
+        }
         return;
       }
 
-      final resp = await supabase
-          .from('reminders')
-          .select()
-          .eq('vehicle_id', vehicleId)
-          .order('next_due_date', ascending: true)
-          .order('next_due_odometer', ascending: true)
-          .order('created_at', ascending: true);
+      final reminders =
+          await _reminderService.getRemindersForVehicle(vehicleId);
 
-      final list =
-          (resp as List<dynamic>? ?? []).cast<Map<String, dynamic>>();
-
-      setState(() {
-        _reminders = list;
-      });
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-        _reminders = [];
-      });
+      if (mounted) {
+        setState(() {
+          _reminders = reminders;
+        });
+      }
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-        _reminders = [];
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Error loading reminders: $e';
+          _reminders = [];
+        });
+      }
     } finally {
-      setState(() {
-        _loading = false;
-      });
-    }
-  }
-
-  String _formatDate(String? isoString) {
-    if (isoString == null) return 'No date set';
-    try {
-      final d = DateTime.parse(isoString);
-      return '${d.month}/${d.day}/${d.year}';
-    } catch (_) {
-      return isoString;
-    }
-  }
-
-  String _statusForReminder(Map<String, dynamic> r) {
-    final isActive = (r['is_active'] as bool?) ?? true;
-    if (!isActive) return 'Inactive';
-
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-
-    final nextDateStr = r['next_due_date'] as String?;
-    DateTime? nextDate;
-    if (nextDateStr != null) {
-      try {
-        nextDate = DateTime.parse(nextDateStr);
-      } catch (_) {}
-    }
-
-    final nextOdo = r['next_due_odometer'] as num?;
-    final vehicleOdo = widget.vehicle['current_odometer'] as num?;
-
-    bool overdue = false;
-    bool todayOrSoon = false;
-
-    // Date-based
-    if (nextDate != null) {
-      final dDay = DateTime(nextDate.year, nextDate.month, nextDate.day);
-      if (dDay.isBefore(today)) {
-        overdue = true;
-      } else if (dDay == today) {
-        todayOrSoon = true;
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
       }
-    }
-
-    // Mileage-based
-    if (nextOdo != null && vehicleOdo != null) {
-      final remaining = nextOdo - vehicleOdo;
-      if (remaining < 0) {
-        overdue = true;
-      } else if (remaining <= 200) {
-        todayOrSoon = true;
-      }
-    }
-
-    if (overdue) return 'Overdue';
-    if (todayOrSoon) return 'Due soon';
-    return 'Upcoming';
-  }
-
-  Color _statusColor(String status) {
-    switch (status) {
-      case 'Overdue':
-        return Colors.red;
-      case 'Due soon':
-        return Colors.orange;
-      case 'Inactive':
-        return Colors.grey;
-      default:
-        return Colors.blue;
     }
   }
 
   void _showAddReminderDialog() {
-    _reminderType = 'Oil change';
+    _reminderType = MaintenanceCategories.oilChange;
     _dueDate = DateTime.now();
     _dueOdometerController.text = '';
     _intervalDaysController.text = '';
@@ -197,8 +133,7 @@ class _RemindersPageState extends State<RemindersPage> {
 
             String dateLabel;
             if (_dueDate != null) {
-              dateLabel =
-                  '${_dueDate!.month}/${_dueDate!.day}/${_dueDate!.year}';
+              dateLabel = DateHelpers.formatDateTime(_dueDate);
             } else {
               dateLabel = 'No date';
             }
@@ -214,36 +149,7 @@ class _RemindersPageState extends State<RemindersPage> {
                       decoration: const InputDecoration(
                         labelText: 'Reminder type',
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'Oil change',
-                          child: Text('Oil change'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Tire rotation',
-                          child: Text('Tire rotation'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Charge rotation',
-                          child: Text('Charge rotation'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Brake service',
-                          child: Text('Brake service'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Inspection',
-                          child: Text('Inspection'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Car wash / Detail',
-                          child: Text('Car wash / Detail'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Other',
-                          child: Text('Other'),
-                        ),
-                      ],
+                      items: MaintenanceCategories.getDropdownItems(),
                       onChanged: (v) {
                         if (v == null) return;
                         setLocalState(() {
@@ -251,7 +157,7 @@ class _RemindersPageState extends State<RemindersPage> {
                         });
                       },
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: UiConstants.spacingSmall),
                     // Due date
                     ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -271,7 +177,7 @@ class _RemindersPageState extends State<RemindersPage> {
                         onPressed: pickDueDate,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: UiConstants.spacingSmall),
                     // Due odometer
                     TextField(
                       controller: _dueOdometerController,
@@ -281,7 +187,7 @@ class _RemindersPageState extends State<RemindersPage> {
                         hintText: 'e.g. 102500',
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: UiConstants.spacingSmall),
                     Row(
                       children: [
                         Expanded(
@@ -293,7 +199,7 @@ class _RemindersPageState extends State<RemindersPage> {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: UiConstants.spacingSmall),
                         Expanded(
                           child: TextField(
                             controller: _intervalMilesController,
@@ -305,7 +211,7 @@ class _RemindersPageState extends State<RemindersPage> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: UiConstants.spacingSmall),
                     TextField(
                       controller: _notesController,
                       maxLines: 3,
@@ -346,17 +252,21 @@ class _RemindersPageState extends State<RemindersPage> {
   Future<void> _saveReminder() async {
     final vehicleId = widget.vehicle['id'] as String?;
     if (vehicleId == null) {
-      setState(() {
-        _errorText = 'Vehicle ID missing.';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Vehicle ID missing.';
+        });
+      }
       return;
     }
 
-    final user = supabase.auth.currentUser;
+    final user = _authService.currentUser;
     if (user == null) {
-      setState(() {
-        _errorText = 'No user logged in.';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'No user logged in.';
+        });
+      }
       return;
     }
 
@@ -369,9 +279,11 @@ class _RemindersPageState extends State<RemindersPage> {
     if (dueOdoText.isNotEmpty) {
       nextOdo = int.tryParse(dueOdoText.replaceAll(',', ''));
       if (nextOdo == null) {
-        setState(() {
-          _errorText = 'Next due odometer must be a number.';
-        });
+        if (mounted) {
+          setState(() {
+            _errorText = 'Next due odometer must be a number.';
+          });
+        }
         return;
       }
     }
@@ -380,9 +292,11 @@ class _RemindersPageState extends State<RemindersPage> {
     if (intervalDaysText.isNotEmpty) {
       intervalDays = int.tryParse(intervalDaysText);
       if (intervalDays == null) {
-        setState(() {
-          _errorText = 'Interval days must be a number.';
-        });
+        if (mounted) {
+          setState(() {
+            _errorText = 'Interval days must be a number.';
+          });
+        }
         return;
       }
     }
@@ -391,65 +305,64 @@ class _RemindersPageState extends State<RemindersPage> {
     if (intervalMilesText.isNotEmpty) {
       intervalMiles = int.tryParse(intervalMilesText);
       if (intervalMiles == null) {
-        setState(() {
-          _errorText = 'Interval miles must be a number.';
-        });
+        if (mounted) {
+          setState(() {
+            _errorText = 'Interval miles must be a number.';
+          });
+        }
         return;
       }
     }
 
-    setState(() {
-      _savingReminder = true;
-      _errorText = null;
-    });
+    if (mounted) {
+      setState(() {
+        _savingReminder = true;
+        _errorText = null;
+      });
+    }
 
     try {
-      await supabase.from('reminders').insert({
-        'user_id': user.id,
-        'vehicle_id': vehicleId,
-        // keep both for compatibility with web + new mobile
-        'type': _reminderType,
-        'reminder_type': _reminderType,
-        'notes': notes.isNotEmpty ? notes : null,
-        'next_due_date':
-            _dueDate != null ? _dueDate!.toIso8601String() : null,
-        'next_due_odometer': nextOdo,
-        'interval_days': intervalDays,
-        'interval_miles': intervalMiles,
-        'is_active': true,
-      });
+      await _reminderService.createReminder(
+        vehicleId: vehicleId,
+        type: _reminderType,
+        reminderType: _reminderType,
+        nextDueDate: _dueDate?.toIso8601String(),
+        nextDueOdometer: nextOdo,
+        intervalDays: intervalDays,
+        intervalMiles: intervalMiles,
+        notes: notes.isNotEmpty ? notes : null,
+        isActive: true,
+      );
 
       await _loadReminders();
       if (mounted) {
         Navigator.of(context).pop();
       }
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Error saving reminder: $e';
+        });
+      }
     } finally {
-      setState(() {
-        _savingReminder = false;
-      });
+      if (mounted) {
+        setState(() {
+          _savingReminder = false;
+        });
+      }
     }
   }
 
   Future<void> _deleteReminder(String id) async {
     try {
-      await supabase.from('reminders').delete().eq('id', id);
+      await _reminderService.deleteReminder(id);
       await _loadReminders();
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Error deleting reminder: $e';
+        });
+      }
     }
   }
 
@@ -457,54 +370,34 @@ class _RemindersPageState extends State<RemindersPage> {
     final id = r['id'] as String?;
     if (id == null) return;
 
-    final intervalDays = r['interval_days'] as int?;
-    final intervalMiles = r['interval_miles'] as int?;
-    final nextDateStr = r['next_due_date'] as String?;
-    final nextOdo = r['next_due_odometer'] as int?;
-
-    DateTime? newDate;
-    int? newOdo;
-
-    if (intervalDays != null && nextDateStr != null) {
-      try {
-        final current = DateTime.parse(nextDateStr);
-        newDate = current.add(Duration(days: intervalDays));
-      } catch (_) {}
-    }
-
-    if (intervalMiles != null && nextOdo != null) {
-      newOdo = nextOdo + intervalMiles;
-    }
+    final intervalDays = r['interval_days'] as num?;
+    final intervalMiles = r['interval_miles'] as num?;
 
     try {
-      if (newDate != null || newOdo != null) {
-        await supabase.from('reminders').update({
-          'next_due_date': newDate?.toIso8601String(),
-          'next_due_odometer': newOdo,
-        }).eq('id', id);
+      // If no intervals are set, deactivate the reminder
+      if ((intervalDays == null || intervalDays <= 0) &&
+          (intervalMiles == null || intervalMiles <= 0)) {
+        await _reminderService.updateReminder(id, {'is_active': false});
       } else {
-        await supabase
-            .from('reminders')
-            .update({'is_active': false}).eq('id', id);
+        // Otherwise, use the service to advance the reminder
+        await _reminderService.markReminderDone(id);
       }
       await _loadReminders();
-    } on PostgrestException catch (e) {
-      setState(() {
-        _errorText = e.message;
-      });
     } catch (e) {
-      setState(() {
-        _errorText = 'Unexpected error: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _errorText = 'Error marking reminder as done: $e';
+        });
+      }
     }
   }
 
   void _showReminderDetails(Map<String, dynamic> r) {
     final type =
         (r['reminder_type'] ?? r['type']) as String? ?? 'Reminder';
-    final status = _statusForReminder(r);
-    final statusColor = _statusColor(status);
-    final nextDateStr = _formatDate(r['next_due_date'] as String?);
+    final status = ReminderHelpers.calculateStatus(r, widget.vehicle);
+    final statusColor = ReminderHelpers.getStatusColor(status);
+    final nextDateStr = DateHelpers.formatDate(r['next_due_date'] as String?);
     final nextOdo = r['next_due_odometer'] as num?;
     final notes = r['notes'] as String?;
     final intervalDays = r['interval_days'] as int?;
@@ -530,12 +423,12 @@ class _RemindersPageState extends State<RemindersPage> {
                   children: [
                     Container(
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
+                        horizontal: UiConstants.spacingSmall,
                         vertical: 4,
                       ),
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(999),
-                        color: statusColor.withOpacity(0.12),
+                        color: statusColor.withValues(alpha: 0.12),
                       ),
                       child: Text(
                         status,
@@ -548,7 +441,7 @@ class _RemindersPageState extends State<RemindersPage> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: UiConstants.spacingSmall),
                 Text(
                   'Next due date: $nextDateStr',
                   style: const TextStyle(fontSize: 13),
@@ -559,7 +452,7 @@ class _RemindersPageState extends State<RemindersPage> {
                   style: const TextStyle(fontSize: 13),
                 ),
                 if (intervalDays != null || intervalMiles != null) ...[
-                  const SizedBox(height: 8),
+                  const SizedBox(height: UiConstants.spacingSmall),
                   const Text(
                     'Repeats:',
                     style: TextStyle(
@@ -579,7 +472,7 @@ class _RemindersPageState extends State<RemindersPage> {
                     ),
                 ],
                 if (notes != null && notes.isNotEmpty) ...[
-                  const SizedBox(height: 8),
+                  const SizedBox(height: UiConstants.spacingSmall),
                   const Text(
                     'Notes:',
                     style: TextStyle(
@@ -657,7 +550,7 @@ class _RemindersPageState extends State<RemindersPage> {
   Widget _buildReminderList() {
     if (_reminders.isEmpty) {
       return const Padding(
-        padding: EdgeInsets.all(12),
+        padding: EdgeInsets.all(UiConstants.spacingMedium),
         child: Text(
           'No reminders yet. Add your first reminder to stay ahead of maintenance.',
           style: TextStyle(
@@ -672,9 +565,9 @@ class _RemindersPageState extends State<RemindersPage> {
       children: _reminders.map((r) {
         final type =
             (r['reminder_type'] ?? r['type']) as String? ?? 'Reminder';
-        final status = _statusForReminder(r);
-        final statusColor = _statusColor(status);
-        final nextDateStr = _formatDate(r['next_due_date'] as String?);
+        final status = ReminderHelpers.calculateStatus(r, widget.vehicle);
+        final statusColor = ReminderHelpers.getStatusColor(status);
+        final nextDateStr = DateHelpers.formatDate(r['next_due_date'] as String?);
         final nextOdo = r['next_due_odometer'] as num?;
 
         String sub = 'Next date: $nextDateStr';
@@ -684,15 +577,15 @@ class _RemindersPageState extends State<RemindersPage> {
 
         return InkWell(
           onTap: () => _showReminderDetails(r),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
           child: Card(
             elevation: 1,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(UiConstants.borderRadiusMedium),
             ),
             margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(UiConstants.spacingMedium),
               child: Row(
                 children: [
                   Expanded(
@@ -717,15 +610,15 @@ class _RemindersPageState extends State<RemindersPage> {
                       ],
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: UiConstants.spacingSmall),
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
+                      horizontal: UiConstants.spacingSmall,
                       vertical: 4,
                     ),
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(999),
-                      color: statusColor.withOpacity(0.12),
+                      color: statusColor.withValues(alpha: 0.12),
                     ),
                     child: Text(
                       status,
@@ -759,7 +652,7 @@ class _RemindersPageState extends State<RemindersPage> {
           child: _loading
               ? const Center(child: CircularProgressIndicator())
               : ListView(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(UiConstants.spacingMedium),
                   children: [
                     if (_errorText != null) ...[
                       Padding(
