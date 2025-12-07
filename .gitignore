@@ -31,3 +31,5 @@ lib/secrets.dart
 
 # Logs
 *.log
+.vercel
+.env*.local
